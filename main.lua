@@ -460,7 +460,12 @@ MenuGroup:AddToggle("KeybindMenuOpen", { Default = false, Text = "Open Keybind M
 MenuGroup:AddToggle("ShowCustomCursor", { Text = "Custom Cursor", Default = true, Callback = function(Value) Library.ShowCustomCursor = Value end })
 MenuGroup:AddDivider()
 MenuGroup:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", { Default = "RightControl", NoUI = true, Text = "Menu keybind" })
-MenuGroup:AddButton("Unload", function() Library:Unload() end)
+MenuGroup:AddButton("Unload", function()
+	blur.Size = 0
+	blur.Parent = nil
+	blur:Destroy()
+	Library:Unload()
+end)
 
 Library.ToggleKeybind = Options.MenuKeybind
 
@@ -550,9 +555,11 @@ local WatermarkConnection = game:GetService("RunService").RenderStepped:Connect(
 end)
 
 Library:OnUnload(function()
-	blur.Size = 0
-	blur.Parent = nil
-	pcall(blur.Destroy, blur)
+	pcall(function()
+		blur.Size = 0
+		blur.Parent = nil
+		blur:Destroy()
+	end)
 	pcall(WatermarkConnection.Disconnect, WatermarkConnection)
 	pcall(blurConn.Disconnect, blurConn)
 	if blurTween then pcall(blurTween.Cancel, blurTween) end
