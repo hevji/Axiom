@@ -510,7 +510,7 @@ snow.Rate = 20
 snow.Speed = NumberRange.new(3, 8)
 snow.VelocityInheritance = 0
 snow.Lifetime = NumberRange.new(10, 20)
-snow.Texture = "rbxasset://textures/particles/sparkle_01.png"
+snow.Texture = "https://raw.githubusercontent.com/hevji/Axiom/main/snowflake.png"
 snow.SpreadAngle = NumberRange.new(0, 360)
 snow.Acceleration = Vector3.new(0, -3, 0)
 snow.Drag = 3
@@ -550,13 +550,15 @@ local WatermarkConnection = game:GetService("RunService").RenderStepped:Connect(
 end)
 
 Library:OnUnload(function()
-	WatermarkConnection:Disconnect()
-	blurConn:Disconnect()
-	if blurTween then blurTween:Cancel() end
-	blur:Destroy()
+	blur.Size = 0
+	blur.Parent = nil
+	pcall(blur.Destroy, blur)
+	pcall(WatermarkConnection.Disconnect, WatermarkConnection)
+	pcall(blurConn.Disconnect, blurConn)
+	if blurTween then pcall(blurTween.Cancel, blurTween) end
 	coroutine.close(snowFollow)
-	snow:Destroy()
-	snowPart:Destroy()
+	pcall(snow.Destroy, snow)
+	pcall(snowPart.Destroy, snowPart)
 	Library.Unloaded = true
 end)
 
