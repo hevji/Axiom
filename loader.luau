@@ -1,4 +1,7 @@
-function(Loader)
-  print("coming soon")
+local Main = function(Loader)
+    Loader()
 end
-Loader()
+
+Main(function()
+    print("Hello")
+end)
