@@ -232,6 +232,50 @@ local function notifyOnce(key, title, text, duration, cooldown)
 	notify(title, text, duration)
 end
 
+-- Persistent status notification (ScreenGui text that stays until dismissed)
+local _statusNotifLabel = nil
+
+local function setStatus(text)
+	local char = LocalPlayer.Character
+	if not char then
+		if _statusNotifLabel then
+			local g = _statusNotifLabel.Parent
+			if g then g:Destroy() end
+			_statusNotifLabel = nil
+		end
+		return
+	end
+	if not _statusNotifLabel then
+		local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		if not pg then return end
+		local gui = Instance.new("ScreenGui")
+		gui.Name = "AxiomStatus"
+		gui.IgnoreGuiInset = true
+		gui.Parent = pg
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.new(1, 0, 0, 36)
+		label.Position = UDim2.new(0, 0, 1, -72)
+		label.BackgroundTransparency = 0.5
+		label.BackgroundColor3 = Color3.new(0, 0, 0)
+		label.TextColor3 = Color3.new(1, 1, 1)
+		label.TextStrokeTransparency = 0.5
+		label.Font = Enum.Font.SourceSansBold
+		label.TextSize = 18
+		label.ZIndex = 10
+		label.Parent = gui
+		_statusNotifLabel = label
+	end
+	_statusNotifLabel.Text = text
+end
+
+local function clearStatus()
+	if _statusNotifLabel then
+		local g = _statusNotifLabel.Parent
+		if g then g:Destroy() end
+		_statusNotifLabel = nil
+	end
+end
+
 -- Send a key event to equip a numbered tool slot
 local function equipToolSlot(slot)
 	local keyMap = {
@@ -279,13 +323,13 @@ end
 local function fireAtChar(targetChar)
 	local tool = getEquippedGun()
 	if not tool then
-		notifyOnce("no_gun", "Combat", "No gun equipped", 2, 3)
+		setStatus("NO GUN EQUIPPED — pressing slot 2")
 		return false
 	end
 	local handle = tool:FindFirstChild("Handle")
 	local muzzle = getMuzzlePos(tool)
 	if not (handle and muzzle) then
-		notifyOnce("no_muzzle", "Combat", "No muzzle found", 2, 3)
+		setStatus("NO MUZZLE FOUND on " .. tool.Name)
 		return false
 	end
 	local part = getHitPart(targetChar)
@@ -322,24 +366,27 @@ end
 
 local function knockPlayer(targetPlayer)
 	if not targetPlayer then
-		notify("Combat", "No target specified", 2)
+		setStatus("ERROR: No target specified")
 		return false
 	end
 	local char = targetPlayer.Character
 	if not char then
-		notify("Combat", "Target has no character", 2)
+		setStatus("ERROR: Target has no character")
 		return false
 	end
 	if not isAlive(char) then
-		notify("Combat", "Target already down", 2)
+		setStatus("WARN: " .. targetPlayer.DisplayName .. " already down")
 		return false
 	end
 	if hasForceField(char) then
-		notify("Combat", "Target has forcefield", 2)
+		setStatus("WARN: " .. targetPlayer.DisplayName .. " has forcefield")
 		return false
 	end
 	local ok = fireAtChar(char)
-	if ok then notify("Knock", "Knocked " .. targetPlayer.DisplayName, 2) end
+	if ok then
+		notify("Knock", "Knocked " .. targetPlayer.DisplayName, 2)
+		clearStatus()
+	end
 	return ok
 end
 
@@ -389,7 +436,7 @@ local function startVoid()
 		local root = getRoot(c)
 		if not root then return end
 		if not c.PrimaryPart then c.PrimaryPart = root end
-		voidAngle = voidAngle + 2.5
+		voidAngle = voidAngle + 35
 		local theta = voidAngle
 		local phi = math.acos(2 * ((voidAngle * 0.37) % 1) - 1)
 		local x = voidRadius * math.sin(phi) * math.cos(theta)
@@ -433,6 +480,13 @@ end
 local function returnToWorld()
 	teleportTo(Vector3.new(0, 100, 0))
 	task.wait()
+end
+
+local function clearBodyVelocity(root)
+	if not root then return end
+	local bv = root:FindFirstChildOfClass("BodyVelocity")
+	if bv then bv:Destroy() end
+	root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
 end
 
 --[[ ============================================================
@@ -601,13 +655,29 @@ end)
 local function executeCarry(targetPlayer, destination)
 	if not targetPlayer then return end
 	stopVoid()
-	returnToWorld()
+	-- Teleport near target before knocking (range check on server)
+	local tChar = targetPlayer.Character
+	if tChar then
+		local tRoot = getRoot(tChar)
+		if tRoot then
+			teleportTo(tRoot.Position + Vector3.new(0, 5, 5))
+		end
+	end
+	task.wait(0.1)
 	carryTarget = targetPlayer
 	carryDestination = destination
 	state = STATE.CARRYING
 	speak("Carrying " .. targetPlayer.DisplayName .. " to destination")
 	notify("Carry", "Carrying " .. targetPlayer.DisplayName, 3)
-	knockPlayer(targetPlayer)
+	-- Retry knock up to 5 times over ~2.5s
+	task.spawn(function()
+		for i = 1, 5 do
+			local c = targetPlayer.Character
+			if c and not isAlive(c) then break end
+			if knockPlayer(targetPlayer) then break end
+			task.wait(0.5)
+		end
+	end)
 end
 
 --[[ ============================================================
@@ -883,8 +953,15 @@ local function processCommand(speaker, text)
 
 	-- .follow — follow the owner (5 behind, 2 above root)
 	elseif cmd == ".follow" then
-		state = STATE.FOLLOW
 		stopVoid()
+		local o = getPlayerByName(STAND_OWNER)
+		if o then
+			local oRoot = getRoot(o.Character)
+			if oRoot then
+				teleportTo(oRoot.Position + (oRoot.CFrame.LookVector * -5) + Vector3.new(0, 2, 0))
+			end
+		end
+		state = STATE.FOLLOW
 		notify("Follow", "Following " .. STAND_OWNER, 3)
 		speak("Following " .. STAND_OWNER)
 
@@ -973,7 +1050,10 @@ local loopConn = RunService.Heartbeat:Connect(function()
 
 	-- === AUTO EQUIP WEAPON (slot 2) ===
 	if not tool then
+		setStatus("NO GUN — pressing slot 2")
 		equipWeapon()
+	else
+		clearStatus()
 	end
 
 	-- === AUTO RELOAD (only when chamber empty) ===
@@ -1049,17 +1129,32 @@ local loopConn = RunService.Heartbeat:Connect(function()
 			if cRoot then
 				local myRoot = getRoot(char)
 				if myRoot then
-					-- Stand on the KO'd player at destination
-					local name = carryTarget.DisplayName
-					teleportTo(carryDestination + Vector3.new(0, 3, 0))
-					state = STATE.IDLE
-					carryTarget = nil
-					notify("Carry", "Dropped " .. name, 2)
-					speak("Dropped target at destination")
+					-- Stand on the ragdoll to drag it via physics
+					local standOn = cRoot.Position + Vector3.new(0, 4, 0)
+					teleportTo(standOn)
+					local dir = carryDestination - standOn
+					if dir.Magnitude > 5 then
+						-- Walk toward destination using BodyVelocity
+						local bv = myRoot:FindFirstChildOfClass("BodyVelocity")
+						if not bv then
+							bv = Instance.new("BodyVelocity")
+							bv.MaxForce = Vector3.new(1, 1, 1) * 9e9
+							bv.P = 5000
+							bv.Parent = myRoot
+						end
+						bv.Velocity = dir.Unit * math.clamp(dir.Magnitude, 15, 80)
+					else
+						clearBodyVelocity(myRoot)
+						local name = carryTarget.DisplayName
+						state = STATE.IDLE
+						carryTarget = nil
+						notify("Carry", "Dropped " .. name, 2)
+						speak("Dropped target at destination")
+					end
 				end
 			end
 		elseif cChar and isAlive(cChar) then
-			knockPlayer(carryTarget)
+			-- Do NOT knock here — executeCarry spawns its own retry batch
 		else
 			state = STATE.IDLE
 			carryTarget = nil
@@ -1089,9 +1184,7 @@ local loopConn = RunService.Heartbeat:Connect(function()
 						local speed = math.clamp(dist * 5, 15, 120)
 						bv.Velocity = dir.Unit * speed
 					else
-						local bv = myRoot:FindFirstChildOfClass("BodyVelocity")
-						if bv then bv:Destroy() end
-						myRoot.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+			clearBodyVelocity(myRoot)
 					end
 				end
 			end
