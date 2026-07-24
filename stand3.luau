@@ -70,6 +70,7 @@ local isVoiding = false
 local isReloading = false
 local lastReloadTime = 0
 local lastActionTime = 0
+local lastNotifyTime = {} -- throttle notifications by key
 
 -- Damage tracking: tracks who damaged the owner
 local damageLog = {} -- { [player] = lastDamageTime }
@@ -223,6 +224,36 @@ local function notify(title, text, duration)
 	end)
 end
 
+-- Throttle notifications by key to avoid spam
+local function notifyOnce(key, title, text, duration, cooldown)
+	local now = tick()
+	if lastNotifyTime[key] and (now - lastNotifyTime[key]) < cooldown then return end
+	lastNotifyTime[key] = now
+	notify(title, text, duration)
+end
+
+-- Send a key event to equip a numbered tool slot
+local function equipToolSlot(slot)
+	local keyMap = {
+		[1] = Enum.KeyCode.One,
+		[2] = Enum.KeyCode.Two,
+		[3] = Enum.KeyCode.Three,
+		[4] = Enum.KeyCode.Four,
+		[5] = Enum.KeyCode.Five,
+		[6] = Enum.KeyCode.Six,
+		[7] = Enum.KeyCode.Seven,
+		[8] = Enum.KeyCode.Eight,
+		[9] = Enum.KeyCode.Nine,
+	}
+	local key = keyMap[slot]
+	if not key then return end
+	pcall(function()
+		VirtualInputManager:SendKeyEvent(true, key, false, nil)
+		task.wait()
+		VirtualInputManager:SendKeyEvent(false, key, false, nil)
+	end)
+end
+
 local function speak(text)
 	pcall(function()
 		local tcs = TextChatService
@@ -248,13 +279,13 @@ end
 local function fireAtChar(targetChar)
 	local tool = getEquippedGun()
 	if not tool then
-		notify("Combat", "No gun equipped", 2)
+		notifyOnce("no_gun", "Combat", "No gun equipped", 2, 3)
 		return false
 	end
 	local handle = tool:FindFirstChild("Handle")
 	local muzzle = getMuzzlePos(tool)
 	if not (handle and muzzle) then
-		notify("Combat", "No muzzle found", 2)
+		notifyOnce("no_muzzle", "Combat", "No muzzle found", 2, 3)
 		return false
 	end
 	local part = getHitPart(targetChar)
@@ -396,6 +427,12 @@ local function teleportToPlayer(player, offset)
 	if root then
 		teleportTo(root.Position + (offset or Vector3.new(0, 3, 4)))
 	end
+end
+
+-- Teleport back to playable area after voiding
+local function returnToWorld()
+	teleportTo(Vector3.new(0, 100, 0))
+	task.wait()
 end
 
 --[[ ============================================================
@@ -564,10 +601,12 @@ end)
 local function executeCarry(targetPlayer, destination)
 	if not targetPlayer then return end
 	stopVoid()
+	returnToWorld()
 	carryTarget = targetPlayer
 	carryDestination = destination
 	state = STATE.CARRYING
 	speak("Carrying " .. targetPlayer.DisplayName .. " to destination")
+	notify("Carry", "Carrying " .. targetPlayer.DisplayName, 3)
 	knockPlayer(targetPlayer)
 end
 
@@ -726,6 +765,7 @@ local function processCommand(speaker, text)
 			return
 		end
 		stopVoid()
+		returnToWorld()
 		speak("Killing " .. target.DisplayName)
 		knockAndStomp(target)
 
@@ -736,6 +776,7 @@ local function processCommand(speaker, text)
 			return
 		end
 		stopVoid()
+		returnToWorld()
 		speak("Knocking " .. target.DisplayName)
 		knockPlayer(target)
 
@@ -746,6 +787,7 @@ local function processCommand(speaker, text)
 			return
 		end
 		stopVoid()
+		returnToWorld()
 		loopTarget = target
 		loopMode = "knock"
 		state = STATE.LOOPING
@@ -758,6 +800,7 @@ local function processCommand(speaker, text)
 			return
 		end
 		stopVoid()
+		returnToWorld()
 		loopTarget = target
 		loopMode = "stomp"
 		state = STATE.LOOPING
@@ -795,11 +838,13 @@ local function processCommand(speaker, text)
 	-- .p {target} — protect mode
 	elseif cmd == ".p" then
 		stopVoid()
+		returnToWorld()
 		setProtectMode(target or getPlayerByName(STAND_OWNER))
 
 	-- .safe — safe mode (rescue KO'd owner)
 	elseif cmd == ".safe" then
 		stopVoid()
+		returnToWorld()
 		executeSafeMode()
 
 	-- .exit — kick the stand
@@ -891,38 +936,16 @@ pcall(function()
 end)
 
 --[[ ============================================================
-	WEAPON LOCK (auto-equip revolver, prevent unequip)
+	WEAPON EQUIP — equips tool slot 2 by pressing the "2" key
 ============================================================ ]]
 
-local REVOLVER_NAME = "Revolver"
-
-local function equipRevolver()
+local function equipWeapon()
 	local char = LocalPlayer.Character
 	if not char then return end
-	-- Already equipped
-	if getEquippedGun() and getEquippedGun().Name == REVOLVER_NAME then return end
-	-- Check backpack
-	local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
-	if bp then
-		for _, item in ipairs(bp:GetChildren()) do
-			if item:IsA("Tool") and item.Name == REVOLVER_NAME then
-				item.Parent = char
-				notify("Weapon", "Equipped " .. REVOLVER_NAME, 2)
-				return
-			end
-		end
-	end
-	-- Check already in character but not detected by getEquippedGun
-	for _, item in ipairs(char:GetChildren()) do
-		if item:IsA("Tool") and item.Name == REVOLVER_NAME then
-			return
-		end
-	end
-end
-
-local function isRevolverEquipped()
-	local tool = getEquippedGun()
-	return tool and tool.Name == REVOLVER_NAME
+	-- Already have a gun equipped
+	if getEquippedGun() then return end
+	-- Press "2" to equip slot 2
+	equipToolSlot(2)
 end
 
 --[[ ============================================================
@@ -948,13 +971,13 @@ local loopConn = RunService.Heartbeat:Connect(function()
 	local armor = getArmor(char)
 	local now = tick()
 
-	-- === AUTO EQUIP REVOLVER ===
-	if not isRevolverEquipped() then
-		equipRevolver()
+	-- === AUTO EQUIP WEAPON (slot 2) ===
+	if not tool then
+		equipWeapon()
 	end
 
 	-- === AUTO RELOAD (only when chamber empty) ===
-	if tool and tool.Name == REVOLVER_NAME and ammo == 0 and maxAmmo > 0 and now - lastReloadTime > 1.5 then
+	if tool and ammo == 0 and maxAmmo > 0 and now - lastReloadTime > 1.5 then
 		reloadWeapon()
 	end
 
@@ -1022,24 +1045,17 @@ local loopConn = RunService.Heartbeat:Connect(function()
 	elseif state == STATE.CARRYING and carryTarget then
 		local cChar = carryTarget.Character
 		if cChar and isKO(cChar) then
-			-- Stand on the KO'd player and move to destination
 			local cRoot = getRoot(cChar)
 			if cRoot then
 				local myRoot = getRoot(char)
 				if myRoot then
-					teleportTo(cRoot.Position + Vector3.new(0, 3, 0))
-					-- Gradually move toward destination
-					local dir = (carryDestination - cRoot.Position)
-					if dir.Magnitude > 10 then
-						dir = dir.Unit * math.min(dir.Magnitude, 50)
-						teleportTo(cRoot.Position + dir + Vector3.new(0, 3, 0))
-					else
-						-- Arrived
-						teleportTo(carryDestination + Vector3.new(0, 0, 3))
-						state = STATE.IDLE
-						carryTarget = nil
-						speak("Dropped target at destination")
-					end
+					-- Stand on the KO'd player at destination
+					local name = carryTarget.DisplayName
+					teleportTo(carryDestination + Vector3.new(0, 3, 0))
+					state = STATE.IDLE
+					carryTarget = nil
+					notify("Carry", "Dropped " .. name, 2)
+					speak("Dropped target at destination")
 				end
 			end
 		elseif cChar and isAlive(cChar) then
@@ -1124,7 +1140,10 @@ LocalPlayer.CharacterAdded:Connect(function(char)
 	stopVoid()
 	char:WaitForChild("HumanoidRootPart")
 	task.wait(0.3)
-	equipRevolver()
+	task.spawn(function()
+		task.wait(0.5)
+		equipToolSlot(2)
+	end)
 end)
 
 end, debug.traceback)
