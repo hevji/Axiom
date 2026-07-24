@@ -137,12 +137,12 @@ local function canTarget(p)
 	return not TARGET_WHITELIST[p.Name] and not TARGET_WHITELIST[p.DisplayName]
 end
 
+-- Lenient gun detection: any Tool with a Handle is usable
 local function getEquippedGun()
 	local char = LocalPlayer.Character
 	if not char then return nil end
 	for _, t in ipairs(char:GetChildren()) do
-		if t:IsA("Tool") and t:FindFirstChild("Handle")
-			and t:FindFirstChild("Ammo") and t:FindFirstChild("Range") then
+		if t:IsA("Tool") and t:FindFirstChild("Handle") then
 			return t
 		end
 	end
@@ -154,8 +154,7 @@ local function getGuns()
 	local guns = {}
 	if not char then return guns end
 	for _, t in ipairs(char:GetChildren()) do
-		if t:IsA("Tool") and t:FindFirstChild("Handle")
-			and t:FindFirstChild("Ammo") and t:FindFirstChild("Range") then
+		if t:IsA("Tool") and t:FindFirstChild("Handle") then
 			guns[#guns + 1] = t
 		end
 	end
@@ -164,12 +163,17 @@ end
 
 local function getMuzzlePos(tool)
 	local handle = tool:FindFirstChild("Handle")
+	if not handle then return nil end
+	-- Try various muzzle locations
 	local muzzle = tool:FindFirstChild("Default")
-		and tool.Default:FindFirstChild("Mesh")
-		and tool.Default.Mesh:FindFirstChild("Muzzle")
-	if muzzle then return muzzle.WorldPosition end
-	if handle then return (handle.CFrame * CFrame.new(0, 0.35, -2.2)).Position end
-	return nil
+	if muzzle then
+		local mesh = muzzle:FindFirstChild("Mesh")
+		if mesh then
+			local m = mesh:FindFirstChild("Muzzle")
+			if m then return m.WorldPosition end
+		end
+	end
+	return (handle.CFrame * CFrame.new(0, 0.35, -2.2)).Position
 end
 
 local function getHitPart(char)
@@ -206,8 +210,18 @@ local function getMaxAmmo(tool)
 end
 
 --[[ ============================================================
-	CHAT FUNCTIONS
+	CHAT / NOTIFICATION FUNCTIONS
 ============================================================ ]]
+
+local function notify(title, text, duration)
+	pcall(function()
+		game:GetService("StarterGui"):SetCore("SendNotification", {
+			Title = title,
+			Text = text,
+			Duration = duration or 3,
+		})
+	end)
+end
 
 local function speak(text)
 	pcall(function()
@@ -233,13 +247,23 @@ end
 
 local function fireAtChar(targetChar)
 	local tool = getEquippedGun()
-	if not tool then return false end
+	if not tool then
+		notify("Combat", "No gun equipped", 2)
+		return false
+	end
 	local handle = tool:FindFirstChild("Handle")
 	local muzzle = getMuzzlePos(tool)
-	if not (handle and muzzle) then return false end
+	if not (handle and muzzle) then
+		notify("Combat", "No muzzle found", 2)
+		return false
+	end
 	local part = getHitPart(targetChar)
 	if not part then return false end
 	if hasForceField(targetChar) then return false end
+	if not MainGameEvent then
+		notify("Combat", "MainGameEvent nil", 3)
+		return false
+	end
 
 	local shotTable = {}
 	for i = 1, 12 do shotTable[i] = buildShotEntry(part) end
@@ -247,27 +271,45 @@ local function fireAtChar(targetChar)
 	local range = (tool:FindFirstChild("Range") and tool.Range.Value) or 500
 	local damage = (tool:FindFirstChild("Damage") and tool.Damage.Value) or 20
 
-	return pcall(function()
+	local ok = pcall(function()
 		MainGameEvent:FireServer("ShootGun", handle, muzzle, shotTable, nil, nil, nil, range, damage)
 	end)
+	return ok
 end
 
 local function stompPlayer(player)
 	if not player then return false end
 	local char = player.Character
 	if not (char and isKO(char)) then return false end
-	return pcall(function()
+	if not MainGameEvent then return false end
+	local ok = pcall(function()
 		MainGameEvent:FireServer("Stomp", player)
 	end)
+	if ok then notify("Stomp", "Stomped " .. player.DisplayName, 2) end
+	return ok
 end
 
 local function knockPlayer(targetPlayer)
-	if not targetPlayer then return false end
+	if not targetPlayer then
+		notify("Combat", "No target specified", 2)
+		return false
+	end
 	local char = targetPlayer.Character
-	if not char then return false end
-	if not isAlive(char) then return false end
-	if hasForceField(char) then return false end
-	return fireAtChar(char)
+	if not char then
+		notify("Combat", "Target has no character", 2)
+		return false
+	end
+	if not isAlive(char) then
+		notify("Combat", "Target already down", 2)
+		return false
+	end
+	if hasForceField(char) then
+		notify("Combat", "Target has forcefield", 2)
+		return false
+	end
+	local ok = fireAtChar(char)
+	if ok then notify("Knock", "Knocked " .. targetPlayer.DisplayName, 2) end
+	return ok
 end
 
 local function knockAndStomp(targetPlayer)
@@ -286,6 +328,7 @@ local function reloadWeapon()
 		MainGameEvent:FireServer("Reload", tool)
 		isReloading = true
 		lastReloadTime = tick()
+		notify("Reload", "Reloading", 1.5)
 	end)
 end
 
@@ -403,6 +446,9 @@ local function buyArmor()
 		task.wait(0.3)
 		root.CFrame = origCF
 	end)
+	if ok then
+		notify("Armor", "Bought armor (" .. best.nearby .. " nearby)", 2)
+	end
 	return ok
 end
 
@@ -517,6 +563,7 @@ end)
 
 local function executeCarry(targetPlayer, destination)
 	if not targetPlayer then return end
+	stopVoid()
 	carryTarget = targetPlayer
 	carryDestination = destination
 	state = STATE.CARRYING
@@ -678,6 +725,7 @@ local function processCommand(speaker, text)
 			speak("Usage: .s {player}")
 			return
 		end
+		stopVoid()
 		speak("Killing " .. target.DisplayName)
 		knockAndStomp(target)
 
@@ -687,6 +735,7 @@ local function processCommand(speaker, text)
 			speak("Usage: .k {player}")
 			return
 		end
+		stopVoid()
 		speak("Knocking " .. target.DisplayName)
 		knockPlayer(target)
 
@@ -696,6 +745,7 @@ local function processCommand(speaker, text)
 			speak("Usage: .lk {player}")
 			return
 		end
+		stopVoid()
 		loopTarget = target
 		loopMode = "knock"
 		state = STATE.LOOPING
@@ -707,6 +757,7 @@ local function processCommand(speaker, text)
 			speak("Usage: .ls {player}")
 			return
 		end
+		stopVoid()
 		loopTarget = target
 		loopMode = "stomp"
 		state = STATE.LOOPING
@@ -743,10 +794,12 @@ local function processCommand(speaker, text)
 
 	-- .p {target} — protect mode
 	elseif cmd == ".p" then
+		stopVoid()
 		setProtectMode(target or getPlayerByName(STAND_OWNER))
 
 	-- .safe — safe mode (rescue KO'd owner)
 	elseif cmd == ".safe" then
+		stopVoid()
 		executeSafeMode()
 
 	-- .exit — kick the stand
@@ -787,6 +840,7 @@ local function processCommand(speaker, text)
 	elseif cmd == ".follow" then
 		state = STATE.FOLLOW
 		stopVoid()
+		notify("Follow", "Following " .. STAND_OWNER, 3)
 		speak("Following " .. STAND_OWNER)
 
 	elseif cmd == ".help" then
@@ -853,6 +907,7 @@ local function equipRevolver()
 		for _, item in ipairs(bp:GetChildren()) do
 			if item:IsA("Tool") and item.Name == REVOLVER_NAME then
 				item.Parent = char
+				notify("Weapon", "Equipped " .. REVOLVER_NAME, 2)
 				return
 			end
 		end
@@ -994,7 +1049,7 @@ local loopConn = RunService.Heartbeat:Connect(function()
 			carryTarget = nil
 		end
 
-	-- FOLLOW — stay 5 behind, 2 above owner's root
+	-- FOLLOW — smoothly follow owner using BodyVelocity
 	elseif state == STATE.FOLLOW then
 		local owner = getPlayerByName(STAND_OWNER)
 		if owner then
@@ -1005,11 +1060,21 @@ local loopConn = RunService.Heartbeat:Connect(function()
 				if myRoot then
 					local behind = oRoot.CFrame.LookVector * -5
 					local targetPos = oRoot.Position + behind + Vector3.new(0, 2, 0)
-					local dist = (targetPos - myRoot.Position).Magnitude
-					if dist > 4 then
-						local dir = (targetPos - myRoot.Position).Unit
-						local move = dir * math.min(dist, 80)
-						myRoot.CFrame = CFrame.new(myRoot.Position + move)
+					local dir = (targetPos - myRoot.Position)
+					local dist = dir.Magnitude
+					if dist > 3 then
+						local bv = myRoot:FindFirstChildOfClass("BodyVelocity")
+						if not bv then
+							bv = Instance.new("BodyVelocity")
+							bv.MaxForce = Vector3.new(1, 1, 1) * 9e9
+							bv.P = 5000
+							bv.Parent = myRoot
+						end
+						local speed = math.clamp(dist * 5, 15, 120)
+						bv.Velocity = dir.Unit * speed
+					else
+						local bv = myRoot:FindFirstChildOfClass("BodyVelocity")
+						if bv then bv:Destroy() end
 						myRoot.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
 					end
 				end
@@ -1029,6 +1094,12 @@ end)
 local __AX_OK, __AX_ERR = xpcall(function()
 
 initDamageTracker()
+
+if not MainGameEvent then
+	speak("WARNING: MainGameEvent not found — combat disabled")
+	notify(STAND_NAME .. " ERROR", "MainGameEvent not found", 8)
+end
+
 speak(STAND_NAME .. " online. Owner: " .. STAND_OWNER)
 
 -- Auto-show chat (for legacy chat access)
@@ -1061,13 +1132,7 @@ end, debug.traceback)
 if __AX_OK then
 	task.spawn(function()
 		task.wait(0.5)
-		pcall(function()
-			game:GetService("StarterGui"):SetCore("SendNotification", {
-				Title = STAND_NAME,
-				Text = "Online. Owner: " .. STAND_OWNER,
-				Duration = 5,
-			})
-		end)
+		notify(STAND_NAME, "Online. Owner: " .. STAND_OWNER, 5)
 	end)
 else
 	getgenv().AxiomStandErr = __AX_ERR
